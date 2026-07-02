@@ -3,11 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0E1512" />
-    <title>The Desk — Investment Research</title>
+    <meta name="theme-color" content="#0B1017" />
+    <title>DESK · TERMINAL</title>
     <style>
-      html, body, #root { margin: 0; padding: 0; min-height: 100%; background: #0E1512; }
+      html, body, #root { margin: 0; padding: 0; min-height: 100%; background: #0B1017; color: #F1F5F9; }
+      body { font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', Consolas, monospace; }
+      * { -webkit-font-smoothing: antialiased; }
+      ::selection { background: #F59E0B; color: #0B1017; }
+      /* Custom scrollbars — subtle, terminal-y */
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: #141B25; }
+      ::-webkit-scrollbar-thumb { background: #2E3A4B; border-radius: 0; }
+      ::-webkit-scrollbar-thumb:hover { background: #465468; }
     </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   </head>
   <body>
     <div id="root"></div>

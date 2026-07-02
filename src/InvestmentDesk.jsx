@@ -16,41 +16,49 @@ import {
 } from './market.js';
 import {
   JOURNAL_SETUP_SQL,
+  JOURNAL_MIGRATION_SQL,
+  MISTAKE_CATEGORIES,
+  PROMPT_VERSION,
   journalReady,
   saveAnalysis,
   listForTicker,
   listRecentMisses,
+  listMissesForTicker,
   listAll,
   updateReview,
   deleteAnalysis,
   formatMemoryForPrompt,
+  getMistakeStats,
+  testConnection,
 } from './journal.js';
 
 // ============================================================
-// DESIGN TOKENS — "Personal Research Desk"
-// Warm forest-black base, aged brass accent, sage highlights.
-// Not Bloomberg orange, not acid green. Yours.
+// DESIGN TOKENS — "Terminal" (v2, contrast-tuned)
+// Layered dark surfaces so cards visibly float above the base.
+// Bright-but-readable amber/green/red. WCAG-AA on all muted text.
 // ============================================================
 const C = {
-  bg:       '#0E1512',   // deep forest-black, warm undertone
-  surface:  '#171F1B',   // panel
-  surface2: '#1F2A24',   // card
-  border:   '#2A362F',   // hairline
-  borderStrong: '#3A483F',
-  text:     '#EDE7D8',   // warm paper
-  textMute: '#8B9791',   // muted sage
-  textDim:  '#5A6862',
-  brass:    '#C7A96B',   // signature accent
-  brassDim: '#8F7A4B',
-  pos:      '#7FB86B',   // moss green — gains
-  neg:      '#D06E5D',   // terracotta — losses
-  info:     '#6B8CAE',   // steel blue — neutral
-  warn:     '#D4B048',   // amber — alerts
+  bg:       '#0B1017',   // base — deep slate, not pure black (easier on eyes)
+  surface:  '#141B25',   // panel — clearly lighter than bg
+  surface2: '#1B2431',   // card — one step brighter, floats above surface
+  surface3: '#232E3D',   // hover / active row
+  border:   '#2E3A4B',   // clear hairline dividers
+  borderStrong: '#465468',
+  text:     '#F1F5F9',   // primary — near white, high contrast
+  textMute: '#CBD5E1',   // secondary — light gray, readable on all surfaces
+  textDim:  '#94A3B8',   // tertiary — medium gray, still passes AA on bg
+  brass:    '#F59E0B',   // amber — section headers, accents (Tailwind amber-500)
+  brassDim: '#B45309',
+  pos:      '#22C55E',   // green — gains
+  neg:      '#EF4444',   // red — losses
+  info:     '#3B82F6',   // blue — neutral / info
+  warn:     '#EAB308',   // yellow — alerts
 };
 
-const FONT_DISPLAY = "'Fraunces', 'Newsreader', Georgia, serif";
-const FONT_BODY    = "'Inter', system-ui, -apple-system, sans-serif";
-const FONT_MONO    = "'JetBrains Mono', 'SF Mono', Consolas, monospace";
+// Everything is monospace — this is a terminal.
+const FONT_DISPLAY = "'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', Consolas, monospace";
+const FONT_BODY    = "'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', Consolas, monospace";
+const FONT_MONO    = "'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', Consolas, monospace";
 
 // ============================================================
 // LLM PROVIDERS — Gemini (grounded search) or Groq (raw speed)
@@ -222,8 +230,8 @@ function Card({ children, style, ...props }) {
     <div style={{
       background: C.surface2,
       border: `1px solid ${C.border}`,
-      borderRadius: 4,
-      padding: 20,
+      borderRadius: 0,
+      padding: '10px 12px',
       ...style
     }} {...props}>
       {children}
@@ -279,28 +287,36 @@ function Metric({ label, value, change, size = 'md' }) {
 
 function SectionTitle({ children, eyebrow }) {
   return (
-    <div style={{ marginBottom: 16 }}>
-      {eyebrow && (
-        <div style={{ 
-          fontFamily: FONT_MONO, 
-          fontSize: 10, 
-          color: C.brass, 
-          textTransform: 'uppercase', 
-          letterSpacing: 2,
-          marginBottom: 6
-        }}>
-          {eyebrow}
-        </div>
-      )}
-      <div style={{ 
-        fontFamily: FONT_DISPLAY, 
-        fontSize: 22, 
-        color: C.text, 
-        fontWeight: 500,
-        letterSpacing: -0.3
+    <div style={{
+      marginBottom: 10,
+      paddingBottom: 8,
+      borderBottom: `1px solid ${C.border}`,
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 12,
+      flexWrap: 'wrap',
+    }}>
+      <div style={{
+        fontFamily: FONT_MONO,
+        fontSize: 13,
+        color: C.brass,
+        textTransform: 'uppercase',
+        letterSpacing: 2,
+        fontWeight: 600,
       }}>
         {children}
       </div>
+      {eyebrow && (
+        <div style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          color: C.textDim,
+          textTransform: 'uppercase',
+          letterSpacing: 1.5,
+        }}>
+          [{eyebrow}]
+        </div>
+      )}
     </div>
   );
 }
@@ -1042,7 +1058,9 @@ function StockDeepDive() {
     const priorPromise = journalReady() ? Promise.all([
       listForTicker(t.toUpperCase(), 5),
       listRecentMisses(5),
-    ]).catch(() => [[], []]) : Promise.resolve([[], []]);
+      listMissesForTicker(t.toUpperCase(), 3),
+      getMistakeStats(500),
+    ]).catch(() => [[], [], [], null]) : Promise.resolve([[], [], [], null]);
 
     try {
       const [quote, history] = await Promise.all([
@@ -1068,8 +1086,8 @@ function StockDeepDive() {
     }
 
     // Await the journal lookup (it ran in parallel with Yahoo).
-    const [priorTicker, globalMisses] = await priorPromise;
-    memoryBlock = formatMemoryForPrompt(priorTicker, globalMisses);
+    const [priorTicker, globalMisses, tickerMisses, statsSnapshot] = await priorPromise;
+    memoryBlock = formatMemoryForPrompt(priorTicker, globalMisses, statsSnapshot);
     if (priorTicker.length || globalMisses.length) {
       setJournalNote(`Loaded ${priorTicker.length} prior ${priorTicker.length === 1 ? 'call' : 'calls'} for ${t.toUpperCase()}${globalMisses.length ? ` + ${globalMisses.length} global misses` : ''} as context.`);
     }
@@ -1084,11 +1102,16 @@ function StockDeepDive() {
         `- 1M: ${market.returns?.['1M'] || 'n/a'}, 1Y: ${market.returns?.['1Y'] || 'n/a'}, 5Y: ${market.returns?.['5Y'] || 'n/a'}`,
       ].join('\n') : '';
 
-      const prompt = `You are an equity analyst. ${horizon} outlook for ${t.toUpperCase()}.
+      const prompt = `You are a disciplined equity analyst. ${horizon} outlook for ${t.toUpperCase()}.
 
 ${ctxLines}
 ${memoryBlock}
 Use web search for: recent quarterly results, analyst consensus, promoter/FII holding, upcoming catalysts, peer valuations. Do NOT re-fetch prices — use the live numbers above.
+
+DECISION DISCIPLINE (read before choosing a recommendation):
+- Prefer WATCH over BUY when evidence is thin, verifications are missing, or setup resembles a prior MISS with no material change.
+- Every actionable call (BUY/AVOID/EXIT) MUST have at least 2 explicit invalidators and at least 1 recheck trigger.
+- If any critical fundamental is "unavailable", either downgrade confidence or set recommendation to WATCH.
 
 Return ONLY valid JSON, no fences:
 {
@@ -1109,6 +1132,10 @@ Return ONLY valid JSON, no fences:
   "entryStrategy": "how to build a position",
   "buyRange": "ideal accumulation range",
   "scores": {"fundamental":"0-10","technical":"0-10","sentiment":"0-10","overall":"0-10"},
+  "marketRegime": "1-line description of current regime (rate cycle / sector cycle / sentiment)",
+  "invalidators": ["specific events or datapoints that would break this thesis"],
+  "recheckTriggers": [{"event":"what to watch for","byWhen":"quarter or date"}],
+  "priorMistakesConsidered": [{"pattern":"which past mistake pattern","howAvoided":"why THIS call won't repeat it"}],
   "reasoning": {
     "considered": ["what data / signals I evaluated"],
     "couldntVerify": ["what I could not confirm"],
@@ -1117,13 +1144,39 @@ Return ONLY valid JSON, no fences:
   }
 }
 
-Be specific. Use "unavailable" if a datapoint can't be verified. Never fabricate. Do NOT include priceHistory or returns fields — those are already sourced from live data. If prior calls are in memory above, reference them explicitly in reasoning.changesFromPrior.`;
+Be specific. Use "unavailable" if a datapoint can't be verified. Never fabricate. Do NOT include priceHistory or returns fields — those come from live data. If prior calls are in memory above, reference them explicitly in reasoning.changesFromPrior AND priorMistakesConsidered.`;
 
-      const text = await callClaude(prompt, { maxTokens: 2800 });
+      const text = await callClaude(prompt, { maxTokens: 3200 });
       const parsed = extractJSON(text);
 
-      // Merge live market data on top so the LLM can't override it
-      const merged = { ...parsed, ticker: t.toUpperCase(), horizon };
+      // Safety gate — may downgrade action to WATCH before user sees it
+      const safetyGate = applySafetyGate({
+        parsed,
+        market,
+        priorMissesTicker: tickerMisses,
+        priorMissesGlobal: globalMisses,
+      });
+      const conf = calibrateConfidence({
+        parsed,
+        market,
+        safetyGate,
+        priorMissesTicker: tickerMisses,
+      });
+
+      // Merge live market data + apply gate + calibration
+      const merged = {
+        ...parsed,
+        ticker: t.toUpperCase(),
+        horizon,
+        // Final recommendation is post-safety-gate. Keep original for audit.
+        recommendation: safetyGate.finalRec,
+        originalRecommendation: safetyGate.originalRec,
+        safetyGate,
+        statedConfidence: conf.stated,
+        confidence: conf.calibrated != null ? String(conf.calibrated) : parsed.confidence,
+        confidenceCalibration: conf,
+        promptVersion: PROMPT_VERSION,
+      };
       if (market) {
         merged.companyName  = market.quote.name || parsed.companyName;
         merged.currentPrice = formatPrice(market.quote.price, market.quote.currency);
@@ -1142,8 +1195,10 @@ Be specific. Use "unavailable" if a datapoint can't be verified. Never fabricate
           horizon,
           priceAtAnalysis: market?.quote?.price,
           currency: market?.quote?.currency || 'INR',
-          recommendation: merged.recommendation,
-          confidence: merged.confidence,
+          recommendation: merged.recommendation, // post-gate action
+          confidence: conf.calibrated,
+          statedConfidence: conf.stated,
+          calibratedConfidence: conf.calibrated,
           risk: merged.risk,
           fairValue: merged.fairValue,
           buyRange: merged.buyRange,
@@ -1152,8 +1207,19 @@ Be specific. Use "unavailable" if a datapoint can't be verified. Never fabricate
           bullCase: merged.bullCase,
           bearCase: merged.bearCase,
           fullData: parsed,
+          recordType: 'stock_deepdive',
+          marketRegime: merged.marketRegime,
+          modelVersion: getProvider(),
+          promptVersion: PROMPT_VERSION,
+          grounded: getProvider() === 'gemini',
+          invalidators: merged.invalidators,
+          recheckTriggers: merged.recheckTriggers,
+          priorMistakesConsidered: merged.priorMistakesConsidered,
+          safetyGate,
         }).then(res => {
-          if (res.ok) setJournalNote('Saved to journal.');
+          if (res.ok) setJournalNote(safetyGate.downgraded
+            ? `Saved. Safety gate downgraded ${safetyGate.originalRec} → WATCH (${safetyGate.reasons.length} reason${safetyGate.reasons.length === 1 ? '' : 's'}).`
+            : 'Saved to journal.');
           else console.warn('Journal save failed:', res.reason);
         });
       }
@@ -1252,6 +1318,108 @@ Be specific. Use "unavailable" if a datapoint can't be verified. Never fabricate
       {data && <StockAnalysisContent data={data} loading={loading} />}
     </div>
   );
+}
+
+// ============================================================
+// SAFETY GATE + CONFIDENCE CALIBRATION
+// The gate runs BEFORE we render a BUY/ADD/EXIT/REDUCE. If evidence is
+// weak, data is stale, or the thesis matches a prior failure pattern,
+// we downgrade to WATCH so the user never sees a confident-looking
+// action that we shouldn't have made. This is the "fail safe" layer.
+// ============================================================
+
+// Actions that require strong evidence — if the gate flags a problem,
+// these get downgraded. HOLD/WATCH/AVOID are already conservative.
+const ACTIONABLE_RECS = new Set(['BUY', 'ADD', 'EXIT', 'REDUCE']);
+
+function isDataStale(quote, maxAgeMinutes = 60 * 24) {
+  // Yahoo `regularMarketTime` is seconds since epoch. Trading data on
+  // weekends will always be "stale" by strict definition — we allow 24h.
+  const ts = quote?.regularMarketTime;
+  if (!ts) return false; // if unknown, assume ok — Yahoo usually returns it
+  const ageMin = (Date.now() / 1000 - ts) / 60;
+  return ageMin > maxAgeMinutes;
+}
+
+function countMissingFundamentals(fundamentals) {
+  if (!fundamentals) return 6;
+  const keys = ['revenueGrowth','profitGrowth','roe','roce','debtToEquity','pe'];
+  return keys.filter(k => !fundamentals[k] || fundamentals[k] === 'unavailable').length;
+}
+
+// Given the LLM-produced call + context (Yahoo data, prior misses for this
+// ticker, prior misses globally, mistake-frequency stats), decide whether
+// to keep the recommendation or downgrade to WATCH. Also returns the
+// list of reasons so the audit trail can show why.
+function applySafetyGate({ parsed, market, priorMissesTicker, priorMissesGlobal }) {
+  const reasons = [];
+  const rec = String(parsed?.recommendation || '').toUpperCase();
+  const conf = parseInt(parsed?.confidence, 10);
+  const missingFund = countMissingFundamentals(parsed?.fundamentals);
+
+  // 1. Data freshness — no live price = no actionable call
+  if (!market?.quote?.price) {
+    reasons.push('No live price — market data fetch failed.');
+  } else if (isDataStale(market.quote)) {
+    reasons.push('Live price is >24h stale.');
+  }
+
+  // 2. Fundamentals gap — >3 core metrics missing = evidence too thin
+  if (missingFund >= 4) {
+    reasons.push(`${missingFund}/6 core fundamentals unavailable — evidence too thin for an actionable call.`);
+  }
+
+  // 3. Repeat-mistake risk — this ticker has a recent MISS with no
+  //    material change acknowledged in the model's own reasoning
+  if (priorMissesTicker?.length) {
+    const lastMiss = priorMissesTicker[0];
+    const acknowledgedChange = typeof parsed?.reasoning?.changesFromPrior === 'string'
+      && parsed.reasoning.changesFromPrior.trim()
+      && parsed.reasoning.changesFromPrior.toLowerCase() !== 'no change';
+    if (!acknowledgedChange) {
+      reasons.push(`Prior MISS on ${lastMiss.ticker} (${lastMiss.mistake_category || 'uncategorized'}) — model did not describe what changed.`);
+    }
+  }
+
+  // 4. Low stated confidence + actionable = mismatch
+  if (!Number.isNaN(conf) && conf < 45 && ACTIONABLE_RECS.has(rec)) {
+    reasons.push(`Stated confidence ${conf}% is too low for an actionable ${rec}.`);
+  }
+
+  // 5. Missing invalidators — an actionable call without an explicit
+  //    "what would break the thesis" cannot be reviewed later
+  const invalidators = parsed?.invalidators;
+  if (ACTIONABLE_RECS.has(rec) && (!Array.isArray(invalidators) || invalidators.length === 0)) {
+    reasons.push('No invalidators specified — thesis has no falsifiable exit criteria.');
+  }
+
+  const shouldDowngrade = reasons.length > 0 && ACTIONABLE_RECS.has(rec);
+  return {
+    originalRec: rec,
+    finalRec: shouldDowngrade ? 'WATCH' : rec,
+    downgraded: shouldDowngrade,
+    reasons,
+    passed: reasons.length === 0,
+  };
+}
+
+// Post-process the LLM's stated confidence. Reduces confidence when:
+// - Fundamentals are partially missing
+// - Data is stale
+// - The safety gate downgraded the action
+// - There's an unresolved repeat-mistake pattern
+function calibrateConfidence({ parsed, market, safetyGate, priorMissesTicker }) {
+  const stated = parseInt(parsed?.confidence, 10);
+  if (Number.isNaN(stated)) return { stated: null, calibrated: null, deltas: [] };
+  let c = stated;
+  const deltas = [];
+  const missingFund = countMissingFundamentals(parsed?.fundamentals);
+  if (missingFund >= 2) { c -= missingFund * 5; deltas.push(`-${missingFund * 5} missing fundamentals (${missingFund})`); }
+  if (market && isDataStale(market.quote)) { c -= 15; deltas.push('-15 stale market data'); }
+  if (safetyGate?.downgraded)                { c -= 20; deltas.push('-20 safety-gate downgrade'); }
+  if (priorMissesTicker?.length)             { c -= 10; deltas.push(`-10 prior MISS on ${priorMissesTicker[0].ticker}`); }
+  const calibrated = Math.max(0, Math.min(100, Math.round(c)));
+  return { stated, calibrated, deltas };
 }
 
 // Plain-English label for action codes surfaced in Portfolio + Screening.
@@ -1378,6 +1546,27 @@ function StockAnalysisContent({ data, loading }) {
           </div>
         )}
       </Card>
+
+      {/* Safety-gate banner — shows when a BUY/ADD/EXIT/REDUCE was downgraded to WATCH */}
+      {data.safetyGate?.downgraded && (
+        <div style={{
+          padding: '8px 12px',
+          border: `1px solid ${C.warn}`,
+          borderLeft: `3px solid ${C.warn}`,
+          background: C.surface2,
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          color: C.text,
+          lineHeight: 1.5,
+        }}>
+          <div style={{ color: C.warn, letterSpacing: 2, marginBottom: 4, fontSize: 10 }}>
+            SAFETY GATE · DOWNGRADED {data.safetyGate.originalRec} → {data.safetyGate.finalRec}
+          </div>
+          {data.safetyGate.reasons.map((r, i) => (
+            <div key={i} style={{ color: C.textMute, fontSize: 11, marginTop: 2 }}>· {r}</div>
+          ))}
+        </div>
+      )}
 
       {/* Plain-English verdict — what a non-expert should actually do */}
       {verdict && (
@@ -1617,6 +1806,79 @@ function StockAnalysisContent({ data, loading }) {
             <ScoreBar label="Technical" score={data.scores.technical} />
             <ScoreBar label="Sentiment" score={data.scores.sentiment} />
             <ScoreBar label="Overall" score={data.scores.overall} highlight />
+          </div>
+        </Card>
+      )}
+
+      {/* AUDIT TRAIL — invalidators / recheck triggers / prior mistake patterns considered.
+          This is the "consultant grade" evidence trail — makes every call reviewable later. */}
+      {(data.invalidators?.length || data.recheckTriggers?.length || data.priorMistakesConsidered?.length || data.confidenceCalibration || data.marketRegime) && (
+        <Card>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap', marginBottom: 12 }}>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: C.brass, letterSpacing: 2 }}>
+              AUDIT TRAIL
+            </div>
+            {data.marketRegime && (
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: C.textDim, letterSpacing: 1 }}>
+                REGIME · {data.marketRegime}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gap: 14 }}>
+            {Array.isArray(data.invalidators) && data.invalidators.length > 0 && (
+              <div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.neg, letterSpacing: 1.5, marginBottom: 4 }}>
+                  INVALIDATORS · what would break this thesis
+                </div>
+                {data.invalidators.map((x, i) => (
+                  <div key={i} style={{ fontFamily: FONT_MONO, fontSize: 12, color: C.text, lineHeight: 1.5, marginBottom: 2 }}>· {x}</div>
+                ))}
+              </div>
+            )}
+            {Array.isArray(data.recheckTriggers) && data.recheckTriggers.length > 0 && (
+              <div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.info, letterSpacing: 1.5, marginBottom: 4 }}>
+                  RECHECK TRIGGERS · when to re-analyze
+                </div>
+                {data.recheckTriggers.map((x, i) => {
+                  const label = typeof x === 'string' ? x : `${x.event || ''}${x.byWhen ? ` — by ${x.byWhen}` : ''}`;
+                  return (
+                    <div key={i} style={{ fontFamily: FONT_MONO, fontSize: 12, color: C.text, lineHeight: 1.5, marginBottom: 2 }}>· {label}</div>
+                  );
+                })}
+              </div>
+            )}
+            {Array.isArray(data.priorMistakesConsidered) && data.priorMistakesConsidered.length > 0 && (
+              <div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.warn, letterSpacing: 1.5, marginBottom: 4 }}>
+                  PRIOR MISTAKE PATTERNS CONSIDERED
+                </div>
+                {data.priorMistakesConsidered.map((x, i) => {
+                  const pattern = typeof x === 'string' ? x : x.pattern;
+                  const how = typeof x === 'object' ? x.howAvoided : null;
+                  return (
+                    <div key={i} style={{ fontFamily: FONT_MONO, fontSize: 12, color: C.textMute, lineHeight: 1.5, marginBottom: 4 }}>
+                      <span style={{ color: C.text }}>· {pattern}</span>
+                      {how && <div style={{ marginLeft: 12, color: C.textDim, fontSize: 11 }}>→ {how}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {data.confidenceCalibration && data.confidenceCalibration.deltas?.length > 0 && (
+              <div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.brass, letterSpacing: 1.5, marginBottom: 4 }}>
+                  CONFIDENCE CALIBRATION
+                </div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.textMute, marginBottom: 4 }}>
+                  Stated {data.confidenceCalibration.stated ?? '—'}% → Calibrated <span style={{ color: C.text }}>{data.confidenceCalibration.calibrated ?? '—'}%</span>
+                </div>
+                {data.confidenceCalibration.deltas.map((d, i) => (
+                  <div key={i} style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.textDim, marginBottom: 2 }}>· {d}</div>
+                ))}
+              </div>
+            )}
           </div>
         </Card>
       )}
@@ -2511,6 +2773,173 @@ function ScreenResults({ data }) {
 // SETTINGS MODAL — Gemini API key entry
 // ============================================================
 // ============================================================
+// LEGEND — Terminology glossary. Every code the app emits and what
+// a non-expert should read it as. Renders as dense terminal tables.
+// ============================================================
+const LEGEND_SECTIONS = [
+  {
+    title: 'STOCK SIGNALS',
+    subtitle: 'Shown on the Stock deep-dive report',
+    color: 'brass',
+    rows: [
+      ['BUY',    'pos',  'Buy some',      'The stock looks attractive at current prices. Consider starting or adding to a position. Do it in tranches, not all at once.'],
+      ['HOLD',   'info', 'Keep it',       'If you already own it — keep holding. If you don\'t own it — the price isn\'t compelling enough to start today.'],
+      ['WATCH',  'warn', 'Wait & watch',  'Interesting name but not the right entry point. Wait for a pullback or a fresh catalyst (earnings, policy, etc.).'],
+      ['AVOID',  'neg',  'Skip it',       'Risk/reward is unfavourable. Look elsewhere — the fundamentals or valuation say no.'],
+    ],
+  },
+  {
+    title: 'PORTFOLIO ACTIONS',
+    subtitle: 'Shown in the Portfolio rebalancing card',
+    color: 'brass',
+    rows: [
+      ['ADD',    'pos',  'Buy more',     'Increase your position in this holding. It\'s underweight given its strength or your target allocation.'],
+      ['HOLD',   'info', 'Keep it',      'No change needed. This holding is doing its job.'],
+      ['REDUCE', 'warn', 'Trim it',      'Sell some — not all. Position has grown too large, or thesis has weakened but is not broken.'],
+      ['EXIT',   'neg',  'Sell it',      'Sell the whole position. Thesis is broken, or a better opportunity has appeared.'],
+    ],
+  },
+  {
+    title: 'SCREENING ACTIONS',
+    subtitle: 'Shown on picks in the Screen tab',
+    color: 'brass',
+    rows: [
+      ['BUY',      'pos',  'Buy some',    'Screen thinks this is actionable right now — same as the stock-level BUY.'],
+      ['WATCH',    'warn', 'Wait & watch','Passes the screen but you should wait for a better entry.'],
+      ['RESEARCH', 'info', 'Look closer', 'Numbers are interesting but need more digging. Move it to the Stock tab for a full deep-dive.'],
+    ],
+  },
+  {
+    title: 'JOURNAL OUTCOMES',
+    subtitle: 'You mark these on past calls in the Journal tab',
+    color: 'brass',
+    rows: [
+      ['HIT',     'pos',  'Call was right', 'The recommendation played out — BUY made money, AVOID protected you from a loss.'],
+      ['MISS',    'neg',  'Call was wrong', 'The recommendation was wrong. Write down WHY in the Lessons field — the model reads those on the next analysis.'],
+      ['PENDING', 'info', 'Not judged yet', 'Too early to say. Come back after the horizon window (1Y calls need ~1Y).'],
+    ],
+  },
+  {
+    title: 'CONFIDENCE & RISK',
+    subtitle: 'Modifiers on any recommendation',
+    color: 'brass',
+    rows: [
+      ['CONF 80–100', 'pos',  'Strong signal',  'The model is highly confident. Data was clean, thesis is clear.'],
+      ['CONF 50–79',  'info', 'Moderate signal','Reasonable evidence but with gaps. Do your own gut-check.'],
+      ['CONF 0–49',   'warn', 'Weak signal',    'Picture is unclear. Don\'t commit real capital on this alone — wait for more evidence.'],
+      ['RISK LOW',    'pos',  'Safer bet',      'Established company, predictable cash flows, low volatility. Downside limited.'],
+      ['RISK MED',    'warn', 'Normal equity',  'Standard stock market risk. Position sizing matters.'],
+      ['RISK HIGH',   'neg',  'Speculative',    'Small position only. Story stock, high leverage, unproven business, or regulatory overhang.'],
+    ],
+  },
+  {
+    title: 'FINANCIAL METRICS',
+    subtitle: 'Numbers in the FUNDAMENTALS block',
+    color: 'brass',
+    rows: [
+      ['PE',       '', 'Price / Earnings',       'What you pay per rupee of annual profit. Lower = cheaper. Compare vs sector average, not in isolation.'],
+      ['PB',       '', 'Price / Book',           'What you pay per rupee of net assets. <1 = trading below book value. Useful for banks & asset-heavy businesses.'],
+      ['ROE',      '', 'Return on Equity',       'Profit generated per rupee of shareholder money. Higher = better use of capital. >15% is typically strong for Indian equities.'],
+      ['ROCE',     '', 'Return on Capital',      'Similar to ROE but includes debt. Best measure of how efficiently the business puts money to work.'],
+      ['D/E',      '', 'Debt / Equity',          'How leveraged the company is. Below 0.5 = conservative. Above 1.5 = risky in a rising-rate environment.'],
+      ['CAGR',     '', 'Compound Annual Return', 'Annualized return over multi-year period. Smooths out bumpy years.'],
+      ['DIV YLD',  '', 'Dividend Yield',         'Annual dividend as % of price. Income component of return. High yield sometimes signals distress — check payout sustainability.'],
+      ['MKT CAP',  '', 'Market Capitalization',  'Total value of all shares. Large-cap = >Rs 20,000 Cr, Mid = 5,000–20,000, Small = <5,000. Bigger = safer, less growth.'],
+      ['FAIR VAL', '', 'Fair Value',             'What the model thinks the stock is worth. If price is well below fair value, upside exists.'],
+      ['UPSIDE',   '', 'Upside %',               'How much price could climb to reach fair value. 20%+ is meaningful.'],
+    ],
+  },
+];
+
+function LegendTab() {
+  return (
+    <div>
+      <SectionTitle eyebrow="Module 06 — Reference">Legend / Glossary</SectionTitle>
+
+      <div style={{
+        padding: '10px 12px',
+        border: `1px solid ${C.border}`,
+        background: C.surface2,
+        marginBottom: 12,
+        fontFamily: FONT_MONO,
+        fontSize: 11,
+        color: C.textMute,
+        lineHeight: 1.6,
+      }}>
+        <span style={{ color: C.brass, marginRight: 8 }}>INFO ·</span>
+        Every code the app emits, translated into plain English. Refer here anytime a chip or label is unfamiliar.
+      </div>
+
+      <div style={{ display: 'grid', gap: 10 }}>
+        {LEGEND_SECTIONS.map(section => (
+          <div key={section.title} style={{ border: `1px solid ${C.border}`, background: C.surface2 }}>
+            <div style={{
+              padding: '6px 12px',
+              borderBottom: `1px solid ${C.border}`,
+              background: C.surface,
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.brass, letterSpacing: 2, fontWeight: 600 }}>
+                {section.title}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.textDim, letterSpacing: 1 }}>
+                {section.subtitle}
+              </div>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse', fontFamily: FONT_MONO, fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <th style={{ textAlign: 'left', padding: '6px 12px', fontSize: 9, color: C.textDim, letterSpacing: 1.5, fontWeight: 400, width: 120 }}>CODE</th>
+                  <th style={{ textAlign: 'left', padding: '6px 12px', fontSize: 9, color: C.textDim, letterSpacing: 1.5, fontWeight: 400, width: 180 }}>PLAIN ENGLISH</th>
+                  <th style={{ textAlign: 'left', padding: '6px 12px', fontSize: 9, color: C.textDim, letterSpacing: 1.5, fontWeight: 400 }}>WHAT IT MEANS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {section.rows.map(([code, colorKey, plain, meaning], i) => {
+                  const codeColor = colorKey ? C[colorKey] : C.text;
+                  return (
+                    <tr key={code + i} style={{ borderBottom: i < section.rows.length - 1 ? `1px solid ${C.border}` : 'none' }}>
+                      <td style={{ padding: '8px 12px', color: codeColor, fontWeight: 600, letterSpacing: 1, verticalAlign: 'top', whiteSpace: 'nowrap' }}>
+                        {code}
+                      </td>
+                      <td style={{ padding: '8px 12px', color: C.text, verticalAlign: 'top' }}>
+                        {plain}
+                      </td>
+                      <td style={{ padding: '8px 12px', color: C.textMute, verticalAlign: 'top', lineHeight: 1.5 }}>
+                        {meaning}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        marginTop: 14,
+        padding: '10px 12px',
+        border: `1px solid ${C.borderStrong}`,
+        background: C.surface,
+        fontFamily: FONT_MONO,
+        fontSize: 10,
+        color: C.textDim,
+        lineHeight: 1.6,
+      }}>
+        <span style={{ color: C.warn, marginRight: 6 }}>NOTE ·</span>
+        None of this is personalised investment advice. The app runs statistical + LLM analysis on public data; a real decision needs your own risk tolerance, tax situation, and horizon.
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // JOURNAL — Review past analyses, mark hits/misses, capture lessons.
 // Every deep-dive is auto-logged. This tab is where the learning loop closes:
 // pull current prices, compute return vs entry, note what went wrong.
@@ -2523,6 +2952,12 @@ function JournalTab() {
   const [editing, setEditing] = useState(null); // id being edited
   const [draftLessons, setDraftLessons] = useState('');
   const [draftOutcome, setDraftOutcome] = useState('PENDING');
+  const [draftCategory, setDraftCategory] = useState('');
+  const [draftMissed, setDraftMissed] = useState('');
+  const [draftCheck, setDraftCheck] = useState('');
+  const [draftRegime, setDraftRegime] = useState('');
+  const [stats, setStats] = useState(null);
+  const [typeFilter, setTypeFilter] = useState('all'); // all | stock_deepdive | portfolio | screen
 
   const configured = journalReady();
 
@@ -2533,13 +2968,15 @@ function JournalTab() {
       const list = await listAll(100);
       setRows(list);
       // Fetch live quotes for distinct tickers in parallel
-      const tickers = Array.from(new Set(list.map(r => r.ticker))).slice(0, 40);
+      const tickers = Array.from(new Set(list.map(r => r.ticker).filter(t => t && t !== 'PORTFOLIO' && t !== 'SCREEN'))).slice(0, 40);
       if (tickers.length) {
         const results = await getBatchQuotes(tickers);
         const map = {};
         results.forEach(q => { if (!q.failed) map[q.ticker.toUpperCase()] = q; });
         setQuotes(map);
       }
+      const s = await getMistakeStats(500);
+      setStats(s);
     } catch (e) {
       setError(e.message);
     }
@@ -2552,6 +2989,10 @@ function JournalTab() {
     setEditing(row.id);
     setDraftLessons(row.lessons || '');
     setDraftOutcome(row.outcome || 'PENDING');
+    setDraftCategory(row.mistake_category || '');
+    setDraftMissed(row.what_was_missed || '');
+    setDraftCheck(row.what_to_check || '');
+    setDraftRegime(row.market_regime || '');
   };
 
   const commitEdit = async (row) => {
@@ -2565,6 +3006,10 @@ function JournalTab() {
       lessons: draftLessons,
       priceAtReview: live?.price ?? null,
       returnPct: returnPct ?? null,
+      mistakeCategory: draftCategory,
+      whatWasMissed: draftMissed,
+      whatToCheck: draftCheck,
+      marketRegime: draftRegime,
     });
     if (!res.ok) { setError(res.reason); return; }
     setEditing(null);
@@ -2630,6 +3075,98 @@ function JournalTab() {
 
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
 
+      {/* Stats card — hit rate per action + worst recurring mistake patterns */}
+      {stats && (stats.actionStats.length > 0 || stats.mistakeStats.length > 0) && (
+        <Card style={{ marginBottom: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+            <div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: C.brass, letterSpacing: 2, marginBottom: 8 }}>
+                HIT RATE BY ACTION
+              </div>
+              {stats.actionStats.length === 0 ? (
+                <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.textDim }}>No reviewed calls yet.</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: FONT_MONO, fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <th style={{ textAlign: 'left', padding: '4px 8px 4px 0', fontSize: 9, color: C.textDim, fontWeight: 400 }}>ACTION</th>
+                      <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 9, color: C.textDim, fontWeight: 400 }}>HIT</th>
+                      <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 9, color: C.textDim, fontWeight: 400 }}>MISS</th>
+                      <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 9, color: C.textDim, fontWeight: 400 }}>HIT %</th>
+                      <th style={{ textAlign: 'right', padding: '4px 0 4px 8px', fontSize: 9, color: C.textDim, fontWeight: 400 }}>AVG %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stats.actionStats.map(s => {
+                      const recColor = { BUY: C.pos, HOLD: C.info, WATCH: C.warn, AVOID: C.neg, ADD: C.pos, REDUCE: C.warn, EXIT: C.neg, RESEARCH: C.info }[s.action] || C.text;
+                      return (
+                        <tr key={s.action} style={{ borderBottom: `1px solid ${C.border}` }}>
+                          <td style={{ padding: '4px 8px 4px 0', color: recColor, fontWeight: 600 }}>{s.action}</td>
+                          <td style={{ padding: '4px 8px', color: C.pos, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{s.hit}</td>
+                          <td style={{ padding: '4px 8px', color: C.neg, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{s.miss}</td>
+                          <td style={{ padding: '4px 8px', color: C.text, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{s.hitRate == null ? '—' : `${s.hitRate.toFixed(0)}%`}</td>
+                          <td style={{ padding: '4px 0 4px 8px', color: s.avgReturn == null ? C.textDim : s.avgReturn >= 0 ? C.pos : C.neg, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                            {s.avgReturn == null ? '—' : `${s.avgReturn >= 0 ? '+' : ''}${s.avgReturn.toFixed(1)}`}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: C.brass, letterSpacing: 2, marginBottom: 8 }}>
+                RECURRING MISTAKE PATTERNS
+              </div>
+              {stats.mistakeStats.length === 0 ? (
+                <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.textDim }}>
+                  No categorized mistakes yet. When you mark a call MISS, pick a category so patterns can surface.
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gap: 4 }}>
+                  {stats.mistakeStats.slice(0, 8).map(m => (
+                    <div key={m.category} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: FONT_MONO, fontSize: 11 }}>
+                      <span style={{ color: C.text }}>{m.category}</span>
+                      <span style={{ color: C.warn, fontVariantNumeric: 'tabular-nums' }}>×{m.count}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Type filter */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+        {[
+          { id: 'all', label: 'ALL' },
+          { id: 'stock_deepdive', label: 'STOCK' },
+          { id: 'portfolio', label: 'PORTFOLIO' },
+          { id: 'screen', label: 'SCREEN' },
+        ].map(f => (
+          <button
+            key={f.id}
+            onClick={() => setTypeFilter(f.id)}
+            style={{
+              padding: '4px 10px',
+              background: typeFilter === f.id ? C.brass : 'transparent',
+              color: typeFilter === f.id ? C.bg : C.textMute,
+              border: `1px solid ${typeFilter === f.id ? C.brass : C.border}`,
+              borderRadius: 0,
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              letterSpacing: 1.5,
+              cursor: 'pointer',
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
       {rows.length === 0 && !loading && (
         <Card>
           <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: C.textMute, lineHeight: 1.6 }}>
@@ -2639,7 +3176,7 @@ function JournalTab() {
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {rows.map(row => {
+        {rows.filter(r => typeFilter === 'all' || (r.record_type || 'stock_deepdive') === typeFilter).map(row => {
           const live = quotes[row.ticker];
           const returnPct = live && row.price_at_analysis
             ? ((live.price - row.price_at_analysis) / row.price_at_analysis) * 100
@@ -2711,43 +3248,123 @@ function JournalTab() {
                 </div>
               )}
 
-              {row.lessons && !isEditing && (
-                <div style={{ marginTop: 10, padding: 10, background: C.bg, borderRadius: 3, borderLeft: `2px solid ${C.brass}` }}>
-                  <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.brass, letterSpacing: 1.5, marginBottom: 4 }}>LESSONS</div>
-                  <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: C.text, lineHeight: 1.5 }}>{row.lessons}</div>
+              {!isEditing && (row.mistake_category || row.what_was_missed || row.what_to_check || row.market_regime || row.lessons) && (
+                <div style={{ marginTop: 10, padding: 10, background: C.bg, borderLeft: `2px solid ${row.mistake_category ? C.neg : C.brass}` }}>
+                  {row.mistake_category && (
+                    <div style={{ marginBottom: 6 }}>
+                      <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.neg, letterSpacing: 1.5, marginRight: 8 }}>MISTAKE</span>
+                      <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.text }}>{row.mistake_category}</span>
+                    </div>
+                  )}
+                  {row.what_was_missed && (
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.textMute, marginBottom: 4 }}>
+                      <span style={{ color: C.textDim }}>missed · </span>{row.what_was_missed}
+                    </div>
+                  )}
+                  {row.what_to_check && (
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.textMute, marginBottom: 4 }}>
+                      <span style={{ color: C.textDim }}>next-time · </span>{row.what_to_check}
+                    </div>
+                  )}
+                  {row.market_regime && (
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.textMute, marginBottom: 4 }}>
+                      <span style={{ color: C.textDim }}>regime · </span>{row.market_regime}
+                    </div>
+                  )}
+                  {row.lessons && (
+                    <div style={{ marginTop: row.mistake_category ? 6 : 0 }}>
+                      <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.brass, letterSpacing: 1.5, marginBottom: 4 }}>LESSONS</div>
+                      <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: C.text, lineHeight: 1.5 }}>{row.lessons}</div>
+                    </div>
+                  )}
                 </div>
               )}
 
               {isEditing && (
                 <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
-                  <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {['HIT', 'MISS', 'PENDING'].map(o => (
                       <button
                         key={o}
                         onClick={() => setDraftOutcome(o)}
                         style={{
-                          flex: 1,
+                          flex: '1 1 100px',
                           padding: '8px 12px',
                           border: `1px solid ${draftOutcome === o ? C.brass : C.border}`,
                           background: draftOutcome === o ? C.brass : 'transparent',
                           color: draftOutcome === o ? C.bg : C.text,
                           fontFamily: FONT_MONO, fontSize: 11, letterSpacing: 1.5,
-                          borderRadius: 3, cursor: 'pointer', fontWeight: 600,
+                          borderRadius: 0, cursor: 'pointer', fontWeight: 600,
                         }}
                       >
                         {o}
                       </button>
                     ))}
                   </div>
+
+                  {draftOutcome === 'MISS' && (
+                    <>
+                      <div>
+                        <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: C.textDim, letterSpacing: 1.5, marginBottom: 4 }}>
+                          MISTAKE CATEGORY
+                        </div>
+                        <select
+                          value={draftCategory}
+                          onChange={e => setDraftCategory(e.target.value)}
+                          style={{
+                            width: '100%', padding: '8px 10px', background: C.bg,
+                            border: `1px solid ${C.border}`, borderRadius: 0,
+                            color: C.text, fontFamily: FONT_MONO, fontSize: 12, outline: 'none',
+                          }}
+                        >
+                          <option value="">— select category —</option>
+                          {MISTAKE_CATEGORIES.map(c => (
+                            <option key={c} value={c}>{c}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <input
+                        value={draftMissed}
+                        onChange={e => setDraftMissed(e.target.value)}
+                        placeholder="What was missed? (e.g. 'promoter pledging spike Q2', 'RBI 25bp cut priced in')"
+                        style={{
+                          width: '100%', padding: '8px 10px', background: C.bg,
+                          border: `1px solid ${C.border}`, borderRadius: 0,
+                          color: C.text, fontFamily: FONT_MONO, fontSize: 12, outline: 'none',
+                        }}
+                      />
+                      <input
+                        value={draftCheck}
+                        onChange={e => setDraftCheck(e.target.value)}
+                        placeholder="What should I check next time? (e.g. 'always verify promoter pledge before BUY on midcap')"
+                        style={{
+                          width: '100%', padding: '8px 10px', background: C.bg,
+                          border: `1px solid ${C.border}`, borderRadius: 0,
+                          color: C.text, fontFamily: FONT_MONO, fontSize: 12, outline: 'none',
+                        }}
+                      />
+                      <input
+                        value={draftRegime}
+                        onChange={e => setDraftRegime(e.target.value)}
+                        placeholder="Market regime at the time (e.g. 'rate-hike cycle', 'FII selling', 'sector rotation into IT')"
+                        style={{
+                          width: '100%', padding: '8px 10px', background: C.bg,
+                          border: `1px solid ${C.border}`, borderRadius: 0,
+                          color: C.text, fontFamily: FONT_MONO, fontSize: 12, outline: 'none',
+                        }}
+                      />
+                    </>
+                  )}
+
                   <textarea
                     value={draftLessons}
                     onChange={e => setDraftLessons(e.target.value)}
-                    placeholder="What did I get right or wrong? What signal did I miss? (This is fed back into future analyses.)"
+                    placeholder="Free-form lessons — used in future prompts. Be concrete."
                     rows={3}
                     style={{
                       width: '100%', padding: 10, background: C.bg,
-                      border: `1px solid ${C.border}`, borderRadius: 4,
-                      color: C.text, fontFamily: FONT_BODY, fontSize: 13,
+                      border: `1px solid ${C.border}`, borderRadius: 0,
+                      color: C.text, fontFamily: FONT_MONO, fontSize: 12,
                       outline: 'none', resize: 'vertical', lineHeight: 1.5,
                     }}
                   />
@@ -2781,6 +3398,8 @@ function SettingsModal({ open, onClose }) {
   const [showSql, setShowSql] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null); // { ok, count | reason }
 
   useEffect(() => {
     if (!open) return;
@@ -2794,7 +3413,21 @@ function SettingsModal({ open, onClose }) {
     setSaved(false);
     setShowSql(false);
     setCopiedSql(false);
+    setTestResult(null);
   }, [open]);
+
+  const runTest = async () => {
+    // Persist first so testConnection reads the latest values.
+    try {
+      localStorage.setItem('supabaseUrl', supabaseUrl.trim());
+      localStorage.setItem('supabaseAnonKey', supabaseKey.trim());
+    } catch {}
+    setTesting(true);
+    setTestResult(null);
+    const res = await testConnection();
+    setTesting(false);
+    setTestResult(res);
+  };
 
   if (!open) return null;
 
@@ -2960,6 +3593,34 @@ function SettingsModal({ open, onClose }) {
             }}
           />
 
+          <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              onClick={runTest}
+              disabled={testing || !supabaseUrl.trim() || !supabaseKey.trim()}
+              style={{
+                background: 'transparent',
+                border: `1px solid ${C.brass}`,
+                color: C.brass,
+                fontFamily: FONT_MONO, fontSize: 10, letterSpacing: 1.5,
+                padding: '6px 10px', borderRadius: 0, cursor: 'pointer',
+                opacity: (testing || !supabaseUrl.trim() || !supabaseKey.trim()) ? 0.4 : 1,
+              }}
+            >
+              {testing ? 'TESTING…' : 'TEST CONNECTION'}
+            </button>
+            {testResult && (
+              <span style={{
+                fontFamily: FONT_MONO, fontSize: 11,
+                color: testResult.ok ? C.pos : C.neg,
+                letterSpacing: 0.5,
+              }}>
+                {testResult.ok
+                  ? `✓ OK · ${testResult.count} record${testResult.count === 1 ? '' : 's'} in analyses`
+                  : `✗ ${testResult.reason}`}
+              </span>
+            )}
+          </div>
+
           <button
             onClick={() => setShowSql(v => !v)}
             style={{
@@ -3047,6 +3708,7 @@ export default function App() {
     { id: 'portfolio', label: 'Portfolio', icon: Briefcase },
     { id: 'screen', label: 'Screen', icon: Filter },
     { id: 'journal', label: 'Journal', icon: Clock },
+    { id: 'legend', label: 'Legend', icon: AlertCircle },
   ];
 
   return (
@@ -3056,63 +3718,63 @@ export default function App() {
       color: C.text,
       fontFamily: FONT_BODY,
     }}>
-      {/* Fraunces + Inter + JetBrains Mono loaded via Google Fonts */}
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
         input::placeholder, textarea::placeholder { color: ${C.textDim}; }
-        button:hover:not(:disabled) { transform: translateY(-1px); }
+        input:focus, textarea:focus { border-color: ${C.brass} !important; }
+        /* Tables scroll horizontally on narrow screens rather than overflow the layout */
+        table { max-width: 100%; }
+        /* Cards / rows adapt to viewport */
+        @media (max-width: 720px) {
+          main { padding: 10px 10px 40px !important; }
+          header, nav { padding-left: 10px !important; padding-right: 10px !important; }
+          /* Nav function-key labels get more air on mobile */
+          nav button { padding: 10px 12px !important; font-size: 10px !important; }
+        }
+        @media (max-width: 480px) {
+          /* Force even tighter on phone */
+          nav button { padding: 8px 10px !important; }
+        }
       `}</style>
 
-      {/* Header */}
-      <header style={{ 
-        borderBottom: `1px solid ${C.border}`, 
-        padding: '18px 24px',
+      {/* Header — terminal-style status bar */}
+      <header style={{
+        borderBottom: `1px solid ${C.border}`,
+        padding: '6px 16px',
         background: C.bg,
         position: 'sticky',
         top: 0,
-        zIndex: 50
+        zIndex: 50,
       }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
-              <div style={{ 
-                fontFamily: FONT_DISPLAY, 
-                fontSize: 22, 
-                fontWeight: 500,
-                letterSpacing: -0.5,
-                color: C.text
-              }}>
-                The Desk
-              </div>
-              <div style={{ 
-                fontFamily: FONT_MONO, 
-                fontSize: 10, 
-                color: C.brass, 
-                letterSpacing: 2,
-                textTransform: 'uppercase'
-              }}>
-                Investment Research
-              </div>
-            </div>
-            <div style={{ 
-              fontFamily: FONT_BODY, 
-              fontSize: 11, 
-              color: C.textDim, 
-              marginTop: 2
-            }}>
-              Live data · Live search · Every session fresh
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ maxWidth: 1400, margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 16 }}>
             <div style={{
               fontFamily: FONT_MONO,
-              fontSize: 11,
+              fontSize: 13,
+              fontWeight: 700,
+              letterSpacing: 2,
+              color: C.brass,
+            }}>
+              DESK
+            </div>
+            <div style={{
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              color: C.textDim,
+              letterSpacing: 1.5,
+            }}>
+              INVESTMENT · TERMINAL · v0.1
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{
+              fontFamily: FONT_MONO,
+              fontSize: 10,
               color: C.textMute,
               letterSpacing: 1,
-              fontVariantNumeric: 'tabular-nums'
+              fontVariantNumeric: 'tabular-nums',
             }}>
-              {new Date().toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })}
+              {new Date().toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}
             </div>
             <button
               onClick={() => setSettingsOpen(true)}
@@ -3120,56 +3782,53 @@ export default function App() {
               style={{
                 background: 'transparent',
                 border: `1px solid ${C.border}`,
-                borderRadius: 4,
-                padding: '6px 8px',
+                borderRadius: 0,
+                padding: '3px 8px',
                 cursor: 'pointer',
-                color: C.textMute,
-                display: 'flex',
-                alignItems: 'center',
+                color: C.brass,
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                letterSpacing: 1.5,
               }}
             >
-              <Settings size={14} />
+              CFG
             </button>
           </div>
         </div>
       </header>
 
-      {/* Tab nav */}
-      <nav style={{ 
+      {/* Tab nav — command-line style function keys */}
+      <nav style={{
         borderBottom: `1px solid ${C.border}`,
-        background: C.surface,
+        background: C.bg,
         position: 'sticky',
-        top: 65,
-        zIndex: 49
+        top: 33,
+        zIndex: 49,
       }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto', display: 'flex', overflowX: 'auto' }}>
-          {tabs.map(t => {
-            const Icon = t.icon;
+        <div style={{ maxWidth: 1400, margin: '0 auto', display: 'flex', overflowX: 'auto' }}>
+          {tabs.map((t, i) => {
             const active = tab === t.id;
             return (
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
                 style={{
-                  background: 'transparent',
+                  background: active ? C.surface2 : 'transparent',
                   border: 'none',
+                  borderRight: `1px solid ${C.border}`,
                   borderBottom: `2px solid ${active ? C.brass : 'transparent'}`,
-                  padding: '14px 20px',
+                  padding: '8px 16px',
                   cursor: 'pointer',
                   fontFamily: FONT_MONO,
-                  fontSize: 12,
+                  fontSize: 11,
                   color: active ? C.brass : C.textMute,
                   letterSpacing: 1.5,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
                   whiteSpace: 'nowrap',
-                  transition: 'all 0.15s',
                   textTransform: 'uppercase',
-                  fontWeight: 500
+                  fontWeight: active ? 600 : 400,
                 }}
               >
-                <Icon size={14} />
+                <span style={{ color: C.textDim, marginRight: 6 }}>F{i + 1}</span>
                 {t.label}
               </button>
             );
@@ -3178,27 +3837,29 @@ export default function App() {
       </nav>
 
       {/* Content */}
-      <main style={{ maxWidth: 1200, margin: '0 auto', padding: '28px 24px 60px' }}>
+      <main style={{ maxWidth: 1400, margin: '0 auto', padding: '12px 16px 40px' }}>
         {tab === 'brief' && <DailyBrief />}
         {tab === 'stock' && <StockDeepDive />}
         {tab === 'portfolio' && <PortfolioTab />}
         {tab === 'screen' && <ThematicScreen />}
         {tab === 'journal' && <JournalTab />}
+        {tab === 'legend' && <LegendTab />}
       </main>
 
       {/* Footer */}
-      <footer style={{ 
-        borderTop: `1px solid ${C.border}`, 
-        padding: '20px 24px',
-        marginTop: 40
+      <footer style={{
+        borderTop: `1px solid ${C.border}`,
+        padding: '10px 16px',
+        marginTop: 24,
       }}>
-        <div style={{ 
-          maxWidth: 1200, 
-          margin: '0 auto', 
-          fontFamily: FONT_BODY,
-          fontSize: 11,
+        <div style={{
+          maxWidth: 1400,
+          margin: '0 auto',
+          fontFamily: FONT_MONO,
+          fontSize: 9,
           color: C.textDim,
-          lineHeight: 1.6
+          lineHeight: 1.5,
+          letterSpacing: 0.5,
         }}>
           Research tool for informational purposes only. Not investment advice from a SEBI-registered Investment Adviser. 
           Data is retrieved via live web search from public sources (NSE, BSE, Reuters, MoneyControl, Screener, etc.) 
